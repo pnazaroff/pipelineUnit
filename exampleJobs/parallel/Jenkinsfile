@@ -1,91 +1,71 @@
-/**
- * A pipeline to demo running parallel branches using both a dynamic and static coding method.
- *
- * In the Blue Ocean GUI, a dynamic construction might be better so as not to show parallel
- * branches that are skipped in the graphic representation of a run.
- */
-
-/**
- * A map of parallel runs built dynamically in the job. It is a map of closures
- */
-def parallelCodeMap = [:]
-
-/**
- * Declarative pipeline
- */
 pipeline {
-
     agent any
-
-    stages {
-
-        stage('Setup') {
-
-            steps {
-
-                // Set up the dynamic parallel code map
-                script {
-
-                    parallelCodeMap['foo'] = {
-                        echo "Running foo branch.."
-                    }
-
-                    parallelCodeMap['bar'] = {
-                        echo "Running bar branch..."
-                    }
-                }
+environment {
+    pipeline_name = "testpipeline"
+    TAG="${currentBuild.number}"
+}
+stages {
+    stage('git') {
+        steps {
+            dir('source') {
+                git 'https://github.com/curl/curl'
             }
-        }
-
-        stage('Dynamic') {
-            steps {
-                script {
-                    parallel( parallelCodeMap )
-                }
-            }
-        }
-
-        // Pre pipeline v1.2 do it this way, awkward syntax
-        stage('Static Old Way') {
-            steps {
-                parallel (
-                    'branch_1' : {
-                        echo "Running static branch 1"
-                    },
-                    'branch_2' : {
-                        echo "Running static branch 2"
-                    },
-                )
-            }
-        }
-
-        // From pipeline v1.2 do it this way : requires Pipeline Model Definition Plugin v1.2+
-        stage('Static New Way') {
-
-            // Support for full parallel stages. Nice.
-            parallel {
-
-                stage('Stage 1') {
-                    steps {
-                        echo "Running pipeline v1.2 static stage 1"
-                    }
-                }
-
-                stage('Stage 2') {
-                    steps {
-                        echo "Running pipeline v1.2 static stage 2"
-                    }
-                }
-
-                stage('Stage Skipped') {
-
-                    when { expression { false } }
-
-                    steps {
-                        echo "pipeline v1.2 static stage will be skipped"
-                    }
-                }
+            dir('another_so') {
+                git credentialsId: '62a77dde-6990-4b9d-99ea-30a1018bc822',
+                url: 'https://git.epam.com/pavel_nazarau/ci-mvp.git'
             }
         }
     }
+    stage('Code Quality Check via SonarQube') {
+        steps {
+            script {
+            def scannerHome = tool 'sonar';
+                withSonarQubeEnv("sonar") {
+                sh "${tool("sonar")}/bin/sonar-scanner \
+               -Dsonar.projectKey=curl \
+               -Dsonar.sources=source/src \
+               -Dsonar.cfamily.build-wrapper-output=build_wrapper_output_directory \
+               -Dsonar.sourceEncoding=UTF-8 \
+               -Dsonar.host.url=http://sonar:9000 \
+               -Dsonar.login=e88a2a5db8fd28f9f6d16c3d2a3dae49c4ea475f"
+                    }
+                }
+            }
+        }
+    stage('build') {
+        steps {
+            sh "pwd && ls"
+            sh 'echo "current build number: ${TAG}"'
+            sh 'cp /var/jenkins_home/workspace/${pipeline_name}/another_so/Dockerfile /var/jenkins_home/workspace/${pipeline_name}/source/'
+            sh 'docker build -t curl:0.${TAG} /var/jenkins_home/workspace/${pipeline_name}/source/'
+        }
+    }
+    stage('test and copy artefact') {
+        steps {
+            sh 'chmod a+x /var/jenkins_home/workspace/${pipeline_name}/another_so/test.sh'
+            sh '/var/jenkins_home/workspace/${pipeline_name}/another_so/test.sh'
+            sh 'docker run -d curl:0.${TAG}'
+            sh 'CONTAINER_ID=$(docker ps -alq) && docker cp $CONTAINER_ID:/curl . && docker rm $CONTAINER_ID -f'
+        }
+    }
+    stage ('Push crrul to Artifactory') {
+        steps {
+            rtUpload (
+                buildName: 'testproj',
+                buildNumber: '${TAG}',
+                serverId: 'art1',
+                        spec:
+                    """{
+                        "files": [
+                        {
+                        "pattern": "curl",
+                        "target": "curl/"
+                        }
+
+                        ]
+                        }"""
+                )
+        }
+    }
+}
 }
